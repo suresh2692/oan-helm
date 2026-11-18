@@ -49,7 +49,7 @@ All in `values/farmer.yaml`:
 |---|---|---|
 | Staff API | request 1500m CPU / 595Mi, limit 1536Mi memory, no CPU limit | a pod uses ~3 cores under load; CPU request is the autoscaler's baseline |
 | Partner API | request 1000m / 640Mi, limit 1280Mi | |
-| Celery worker | request = limit 9Gi, 1000m CPU; `CELERY_OPTS` 4 processes, prefetch 1, fresh process per task, 1.5 GB per process, 600/660 s time limit | 0 out-of-memory kills under backlog (was 115 in 9 h with 16 processes); fresh process works around the shared-event-loop bug |
+| Celery worker | request 1500m CPU / 1Gi, limit 1600Mi memory (measured peak 767 MB per pod); `CELERY_OPTS` 4 processes, prefetch 1, fresh process per task, 1.5 GB per process, 600/660 s time limit | 0 out-of-memory kills under backlog (was 115 in 9 h with 16 processes); fresh process works around the shared-event-loop bug |
 | Celery worker AWE | `REGISTRY_CELERY_WORKERS_AWE_*` | the chart leaves AWE off in the worker; intakes never reach approval without it |
 | DB port 6432 (staff API, partner API, beat, worker) | HAProxy `:6432` → PgBouncer | connection pooling; halves database CPU per request together with the role settings |
 | DB pool per worker process (staff API, partner API, beat, worker) | `DB_POOL_SIZE` 5 + `DB_POOL_MAX_OVERFLOW` 10 = up to 15 connections; 3 processes per API pod → 45 per pod | values as running (chart defaults, recorded); PgBouncer caps PostgreSQL at 80 farmer connections |

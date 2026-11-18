@@ -91,12 +91,13 @@ registry:
     image:
       tag: 90811b61a59f@sha256:15273f1e29b54f02df09b0bb69c5cf21d68432c1c34f0dd6521a1fbfe64b49c2
     replicaCount: 1                      # = autoscaling.celeryWorker.minReplicas
-    # 4 processes × 1.5 GB cap + parent. request = limit, so one worker fits per 16 GiB node.
+    # Measured with these CELERY_OPTS: idle ~400 Mi, peak 767 MB per pod (100-record backlog). Above 1600Mi the whole
+    # container is OOM-killed (memory.oom.group=1 default) and its in-flight tasks are lost. No CPU limit.
     # NOT settable through this chart: terminationGracePeriodSeconds 720 (> the 660 s task limit), so a scale-down
     # lets running tasks finish. The subchart has no key for it; patch the Deployment after install (README.md).
     resources:
-      requests: {cpu: 1000m, memory: 9Gi}
-      limits: {memory: 9Gi}
+      requests: {cpu: 1500m, memory: 1Gi}
+      limits: {memory: 1600Mi}
     envVars:
       REGISTRY_CELERY_WORKERS_DB_PORT: "6432"
       # DB connections per worker process: up to POOL_SIZE + MAX_OVERFLOW = 15 (values as running; same as the chart
@@ -158,7 +159,7 @@ autoscaling:
     minReplicas: 1
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
-    description: "Celery worker: 1-4 pods (4 processes each) at 70% of the 1000m CPU request"
+    description: "Celery worker: 1-4 pods (4 processes each) at 70% of the 1500m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
     behavior: *throttled
 
 # Permanent search index + role settings for farmer_registry_user (chart templates/db-settings.yaml).
