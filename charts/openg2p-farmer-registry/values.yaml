@@ -77,7 +77,22 @@ registry:
     image:
       repository: 379220350808.dkr.ecr.ap-south-1.amazonaws.com/openg2p/farmer-registry/staff-api
       tag: 262e0d949a99@sha256:f918c5cad9b80f811708c15a679b8c9a5b53dfe78d8579db8a20c217fe9e3bb0
+    # prod-testing (1M-farmer load tests, 2026-11-18). Subchart default: 50m / 768Mi, limit 1536Mi.
+    # No CPU limit: a pod uses ~3 cores under load (3 worker processes). The CPU request is the
+    # autoscaler's baseline (autoscaling.staffApi at the end of this file). Memory: idles at ~540 Mi.
+    replicaCount: 1                  # = autoscaling.staffApi.minReplicas
+    resources:
+      requests: {cpu: 1500m, memory: 595Mi}
+      limits: {memory: 1536Mi}
+    autoscaling:
+      enabled: false                 # subchart HPA off: autoscaling.staffApi (with scale behaviour) is used
     envVars:
+      # DB connections per worker process: up to POOL_SIZE + MAX_OVERFLOW = 15 (= the subchart defaults, shown here)
+      REGISTRY_STAFF_PORTAL_API_DB_POOL_SIZE: '5'
+      REGISTRY_STAFF_PORTAL_API_DB_POOL_MAX_OVERFLOW: '10'
+      REGISTRY_STAFF_PORTAL_API_DB_POOL_RECYCLE: '1800'
+      REGISTRY_STAFF_PORTAL_API_DB_POOL_PRE_PING: 'true'
+      STAFF_PORTAL_NO_OF_WORKERS: '3'            # → up to 45 DB connections per pod
       REGISTRY_STAFF_PORTAL_API_AUTH_REDIS_URL: redis://commons-redis-master.commons.svc.cluster.local:6379/0
       REGISTRY_CORE_REGISTRANT_AUTH_REDIS_URL: redis://commons-redis-master.commons.svc.cluster.local:6379/0
       REGISTRY_CORE_VALIDATE_ATTRIBUTE_VALUES: 'true'
@@ -109,7 +124,21 @@ registry:
     image:
       repository: 379220350808.dkr.ecr.ap-south-1.amazonaws.com/openg2p/farmer-registry/partner-api
       tag: 262e0d949a99@sha256:c650ba8b7e50bda7def4d3b8aa0c7e9399d498bb55676000e86af50342d8dff3
+    # prod-testing: CPU request 50m → 1000m so the autoscaler has a meaningful baseline (70% = 0.7 core);
+    # memory = the subchart defaults (idles at ~385 Mi).
+    replicaCount: 1                  # = autoscaling.partnerApi.minReplicas
+    resources:
+      requests: {cpu: 1000m, memory: 640Mi}
+      limits: {memory: 1280Mi}
+    autoscaling:
+      enabled: false                 # subchart HPA off: autoscaling.partnerApi is used
     envVars:
+      # DB connections per worker process: up to POOL_SIZE + MAX_OVERFLOW = 15 (= the subchart defaults, shown here)
+      REGISTRY_PARTNER_API_DB_POOL_SIZE: '5'
+      REGISTRY_PARTNER_API_DB_POOL_MAX_OVERFLOW: '10'
+      REGISTRY_PARTNER_API_DB_POOL_RECYCLE: '1800'
+      REGISTRY_PARTNER_API_DB_POOL_PRE_PING: 'true'
+      PARTNER_NO_OF_WORKERS: '3'                 # → up to 45 DB connections per pod
       REGISTRY_PARTNER_API_KEYMANAGER_API_BASE_URL: http://commons-services-keymanager.commons.svc.cluster.local/v1/keymanager
       REGISTRY_PARTNER_API_DB_HOSTNAME: commons-postgresql.commons.svc.cluster.local
       REGISTRY_PARTNER_API_MASTER_DATA_API_URL: http://commons-services-master-data-api.commons.svc.cluster.local
@@ -135,7 +164,18 @@ registry:
     image:
       repository: 379220350808.dkr.ecr.ap-south-1.amazonaws.com/openg2p/farmer-registry/celery
       tag: 262e0d949a99@sha256:f1ef7f4c5c60f9b0f7c54a726edcd094db511eb77b63b048d9aeec25e9386bd2
+    # prod-testing (2026-11-18). Subchart default: 100m / 1Gi, limit 2560Mi. Measured with 4 processes and a fresh
+    # process per task: idle ~400 Mi, peak 767 MB per pod. Above the limit the whole container is OOM-killed.
+    replicaCount: 1                  # = autoscaling.celeryWorker.minReplicas
+    resources:
+      requests: {cpu: 1500m, memory: 1Gi}
+      limits: {memory: 1600Mi}
     envVars:
+      # DB connections per worker process: up to POOL_SIZE + MAX_OVERFLOW = 15 (= the subchart defaults, shown here)
+      REGISTRY_CELERY_WORKERS_DB_POOL_SIZE: '5'
+      REGISTRY_CELERY_WORKERS_DB_POOL_MAX_OVERFLOW: '10'
+      REGISTRY_CELERY_WORKERS_DB_POOL_RECYCLE: '1800'
+      REGISTRY_CELERY_WORKERS_DB_POOL_PRE_PING: 'true'
       REGISTRY_CELERY_WORKERS_DB_HOSTNAME: commons-postgresql.commons.svc.cluster.local
       REGISTRY_CELERY_WORKERS_MASTER_DATA_API_URL: http://commons-services-master-data-api.commons.svc.cluster.local
       REGISTRY_CELERY_WORKERS_MASTER_DATA_TOKEN_URL: 'https://keycloak.{{ .Values.global.baseDomain }}/realms/staff/protocol/openid-connect/token'
@@ -157,6 +197,11 @@ registry:
       repository: 379220350808.dkr.ecr.ap-south-1.amazonaws.com/openg2p/farmer-registry/celery
       tag: 262e0d949a99@sha256:f1ef7f4c5c60f9b0f7c54a726edcd094db511eb77b63b048d9aeec25e9386bd2
     envVars:
+      # DB connections per worker process: up to POOL_SIZE + MAX_OVERFLOW = 15 (= the subchart defaults, shown here)
+      REGISTRY_CELERY_BEAT_DB_POOL_SIZE: '5'
+      REGISTRY_CELERY_BEAT_DB_POOL_MAX_OVERFLOW: '10'
+      REGISTRY_CELERY_BEAT_DB_POOL_RECYCLE: '1800'
+      REGISTRY_CELERY_BEAT_DB_POOL_PRE_PING: 'true'
       COMMON_DB_HOSTNAME: commons-postgresql.commons.svc.cluster.local
       NOTIFICATION_ENABLED: 'false'
       NOTIFICATION_PROVIDER_URL: ''
@@ -526,34 +571,42 @@ ecrPullSecret:
 
 # Autoscalers (autoscaling/v2) for the registry subchart Deployments, WITH scale behaviour — the
 # subchart's own HPA (registry.<component>.autoscaling) has none, and the Celery worker has no HPA at all.
-# Off by default. Use instead of the subchart HPA (rendering fails if both are on for one component).
+# ON in this fork (prod-testing sizes, 1M-farmer load tests 2026-11-18); all at 70% of the CPU request.
+# Use instead of the subchart HPA (rendering fails if both are on for one component).
 # The subchart still renders `replicas`, so each helm upgrade resets the count to
 # registry.<component>.replicaCount until the HPA acts: keep replicaCount = minReplicas.
-# CPU utilisation is measured against the container's CPU request, so set registry.<component>.resources.
-# Throttle staff/partner API scale-up (behavior below): each new pod runs the farmer startup
-# migration, which locks g2p_register_farmers for about a minute.
+# Throttled: each new staff/partner API pod runs the farmer startup migration, which locks
+# g2p_register_farmers for about a minute → +1 pod/min, −1 pod per 2 min after 5 min.
 autoscaling:
   staffApi:
-    enabled: false
+    enabled: true
     minReplicas: 1
-    maxReplicas: 3
+    maxReplicas: 5
     targetCPUUtilizationPercentage: 70
-    description: ""        # shown in Rancher (field.cattle.io/description)
-    behavior: {}           # autoscaling/v2 HPA behavior; {} = Kubernetes defaults
+    description: "Staff API: 1-5 pods at 70% of the 1500m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
+    behavior: &throttled
+      scaleUp:
+        stabilizationWindowSeconds: 60
+        selectPolicy: Min
+        policies: [{type: Pods, value: 1, periodSeconds: 60}]
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        selectPolicy: Min
+        policies: [{type: Pods, value: 1, periodSeconds: 120}]
   partnerApi:
-    enabled: false
+    enabled: true
     minReplicas: 1
     maxReplicas: 3
     targetCPUUtilizationPercentage: 70
-    description: ""
-    behavior: {}
+    description: "Partner API: 1-3 pods at 70% of the 1000m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
+    behavior: *throttled
   celeryWorker:
-    enabled: false
+    enabled: true
     minReplicas: 1
-    maxReplicas: 3
+    maxReplicas: 4
     targetCPUUtilizationPercentage: 70
-    description: ""
-    behavior: {}
+    description: "Celery worker: 1-4 pods (4 processes each) at 70% of the 1500m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
+    behavior: *throttled
 
 # Database-side settings, applied after every install/upgrade by an idempotent hook Job that connects
 # as the registry's own DB user (global.registryDBUser; no superuser). Off by default.

@@ -60,8 +60,9 @@ or Git. The public key is printed in the hook log and published in ConfigMap
 `autoscaling.staffApi`, `autoscaling.partnerApi` and `autoscaling.celeryWorker` render
 `autoscaling/v2` HorizontalPodAutoscalers for the registry subchart Deployments, with an
 optional `behavior` block. The subchart's own HPA (`registry.<component>.autoscaling`) has no
-`behavior`, and the Celery worker has no HPA at all. All three are off by default; rendering
-fails if both HPAs are enabled for one component.
+`behavior`, and the Celery worker has no HPA at all. In this fork all three are on by default
+(staff API 1–5, partner API 1–3, Celery worker 1–4 pods); rendering fails if both HPAs are
+enabled for one component.
 
 Throttle staff and partner API scale-up (for example +1 pod per minute). Each new pod runs
 the farmer startup migration, which holds an exclusive lock on `g2p_register_farmers` for
