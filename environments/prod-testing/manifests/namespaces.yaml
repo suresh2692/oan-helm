@@ -1,0 +1,60 @@
+# openg2p-test namespaces — placement is enforced by the API server
+# (PodNodeSelector + PodTolerationRestriction, enabled on rke2-cp-01 2026-11-03).
+# Every pod created in a namespace gets its node selector and tolerations, whatever chart it came from.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commons
+  labels: {field.cattle.io/projectId: p-tgcb7}
+  annotations:
+    field.cattle.io/projectId: "local:p-tgcb7"
+    field.cattle.io/description: "OpenG2P Commons (Keycloak, IAM, Kafka, Redis, master-data, ...). Every pod runs only on commons-app-01 (10.0.20.22)."
+    scheduler.alpha.kubernetes.io/node-selector: "openg2p.org/tenant=commons"
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key":"openg2p.org/pool","operator":"Equal","value":"commons","effect":"NoSchedule"}]'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: farmer
+  labels: {field.cattle.io/projectId: p-tgcb7}
+  annotations:
+    field.cattle.io/projectId: "local:p-tgcb7"
+    field.cattle.io/description: "Farmer registry. Every pod (including db-seed / iam-register jobs) runs only on farmer-app-01 (10.0.20.21)."
+    scheduler.alpha.kubernetes.io/node-selector: "openg2p.org/tenant=farmer"
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key":"openg2p.org/pool","operator":"Equal","value":"farmer","effect":"NoSchedule"}]'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: odk
+  labels: {field.cattle.io/projectId: p-tgcb7}
+  annotations:
+    field.cattle.io/projectId: "local:p-tgcb7"
+    field.cattle.io/description: "ODK Central, installed separately from Commons. Every pod runs only on odk-central-01 (10.0.20.23)."
+    scheduler.alpha.kubernetes.io/node-selector: "openg2p.org/tenant=odk"
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key":"openg2p.org/pool","operator":"Equal","value":"odk","effect":"NoSchedule"}]'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels: {field.cattle.io/projectId: p-tgcb7}
+  annotations:
+    field.cattle.io/projectId: "local:p-tgcb7"
+    field.cattle.io/description: "Services outside Kubernetes (PostgreSQL primary/replica, MinIO) and their exporters. Pods run only on observability-01 (10.0.60.10)."
+    scheduler.alpha.kubernetes.io/node-selector: "openg2p.org/tenant=observability"
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key":"openg2p.org/pool","operator":"Equal","value":"observability","effect":"NoSchedule"}]'
+---
+# HAProxy for PostgreSQL (INSTALL-RUNBOOK step C): one pod on EACH app instance, so every app talks
+# to the proxy on its own node and PostgreSQL still sees which instance a connection came from.
+# Nodes carry label openg2p.org/db-proxy=true (farmer-app-01, commons-app-01, odk-central-01).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db-proxy
+  labels: {field.cattle.io/projectId: p-tgcb7}
+  annotations:
+    field.cattle.io/projectId: "local:p-tgcb7"
+    field.cattle.io/description: "HAProxy in front of PostgreSQL — postgres.db-proxy:5432 read-write (primary), :5433 read-only (replica). One pod per app instance (farmer-app-01, commons-app-01, odk-central-01)."
+    scheduler.alpha.kubernetes.io/node-selector: "openg2p.org/db-proxy=true"
+    scheduler.alpha.kubernetes.io/defaultTolerations: '[{"key":"openg2p.org/pool","operator":"Equal","value":"farmer","effect":"NoSchedule"},{"key":"openg2p.org/pool","operator":"Equal","value":"commons","effect":"NoSchedule"},{"key":"openg2p.org/pool","operator":"Equal","value":"odk","effect":"NoSchedule"}]'

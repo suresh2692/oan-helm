@@ -523,3 +523,60 @@ ecrPullSecret:
   schedule: "0 */6 * * *"
   awsCliImage: amazon/aws-cli:2.36.43
   kubectlImage: alpine/k8s:1.31.1
+
+# Autoscalers (autoscaling/v2) for the registry subchart Deployments, WITH scale behaviour — the
+# subchart's own HPA (registry.<component>.autoscaling) has none, and the Celery worker has no HPA at all.
+# Off by default. Use instead of the subchart HPA (rendering fails if both are on for one component).
+# The subchart still renders `replicas`, so each helm upgrade resets the count to
+# registry.<component>.replicaCount until the HPA acts: keep replicaCount = minReplicas.
+# CPU utilisation is measured against the container's CPU request, so set registry.<component>.resources.
+# Throttle staff/partner API scale-up (behavior below): each new pod runs the farmer startup
+# migration, which locks g2p_register_farmers for about a minute.
+autoscaling:
+  staffApi:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+    description: ""        # shown in Rancher (field.cattle.io/description)
+    behavior: {}           # autoscaling/v2 HPA behavior; {} = Kubernetes defaults
+  partnerApi:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+    description: ""
+    behavior: {}
+  celeryWorker:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+    description: ""
+    behavior: {}
+
+# Database-side settings, applied after every install/upgrade by an idempotent hook Job that connects
+# as the registry's own DB user (global.registryDBUser; no superuser). Off by default.
+#   searchTrigramIndex: GIN trigram index idx_g2p_register_farmers_search_text_trigram on
+#     g2p_register_farmers.search_text — staff portal name / Farmer ID search (ILIKE '%term%') reads the
+#     index instead of every farmer (1M farmers: ~1.4 s → ~0.1 s). Built CONCURRENTLY; never dropped.
+#   roleSettings: ALTER ROLE <registry user> SET key = value, for new sessions. With the trigram index,
+#     set plan_cache_mode: force_custom_plan — otherwise the app's prepared statements switch to a generic
+#     plan that uses the index for browse too (empty filter ILIKE '%%' = every row; ~2x slower).
+dbSettings:
+  enabled: false
+  searchTrigramIndex: true
+  roleSettings: {}
+  #  plan_cache_mode: force_custom_plan
+  #  idle_in_transaction_session_timeout: 60s
+  #  max_parallel_workers_per_gather: "0"
+  maintenanceWorkMem: 256MB
+  waitForSchemaSeconds: 600
+  buildTimeoutSeconds: 1800
+  image:                   # psql client; default: registry.dbSeed.image
+    repository: ""
+    tag: ""
+  imagePullSecrets: []
+  resources:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {memory: 256Mi}

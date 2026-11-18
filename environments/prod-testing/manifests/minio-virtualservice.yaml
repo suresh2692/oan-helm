@@ -1,0 +1,30 @@
+# Browser-facing MinIO. TLS ends at nginx-rp-01; nginx → Istio gateway test/internal (plain HTTP) → minio-01.
+# Host is preserved end to end (nginx: proxy_set_header Host $host), so SigV4 / pre-signed URLs stay valid.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: minio
+  namespace: infra
+  annotations:
+    field.cattle.io/description: "https://minio.ati-uat.oanstaging.com → MinIO S3 API on minio-01:9000. Use as the apps' minioHost (browsers fetch pre-signed URLs from it)."
+spec:
+  hosts: [minio.ati-uat.oanstaging.com]
+  gateways: [test/internal]
+  http:
+    - route:
+        - destination: {host: minio.infra.svc.cluster.local, port: {number: 9000}}
+      timeout: 300s
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: minio-console
+  namespace: infra
+  annotations:
+    field.cattle.io/description: "https://minio-console.ati-uat.oanstaging.com → MinIO console on minio-01:9001 (admin)."
+spec:
+  hosts: [minio-console.ati-uat.oanstaging.com]
+  gateways: [test/internal]
+  http:
+    - route:
+        - destination: {host: minio.infra.svc.cluster.local, port: {number: 9001}}

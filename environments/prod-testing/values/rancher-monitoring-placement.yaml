@@ -1,0 +1,41 @@
+# rancher-monitoring 105.0.0+up57.0.3 — placement overlay, INSTALL-RUNBOOK step 12.
+# Puts Prometheus, Alertmanager and Grafana on observability-01, with Prometheus data on its local
+# disk (PV obs-prometheus, k8s/observability-local-storage.yaml).
+#
+# Applied ON TOP of the values the upstream helmfile installed with (never --reuse-values):
+#   helm -n cattle-monitoring-system get values rancher-monitoring -o yaml > base.yaml   # user values only
+#   helm upgrade rancher-monitoring rancher-charts/rancher-monitoring --version 105.0.0+up57.0.3 \
+#     -n cattle-monitoring-system -f base.yaml -f values/rancher-monitoring-placement.yaml
+# A later upstream `helmfile sync` drops this overlay — re-apply it afterwards.
+# The operator, kube-state-metrics and the node-exporter DaemonSet stay where they are.
+prometheus:
+  prometheusSpec:
+    nodeSelector: {openg2p.org/pool: observability}
+    tolerations:
+      - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+    retention: 10d
+    retentionSize: 35GB
+    # Was 1 CPU / 3000Mi on the control plane; observability-01 has 8 vCPU / 61 GB to itself.
+    resources:
+      requests: {cpu: "1", memory: 2Gi}
+      limits: {cpu: "4", memory: 8Gi}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: observability-local
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests: {storage: 40Gi}
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector: {openg2p.org/pool: observability}
+    tolerations:
+      - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+grafana:
+  nodeSelector: {openg2p.org/pool: observability}
+  tolerations:
+    - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+  # Chart default 200m / 200Mi throttles the load-test dashboards.
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}

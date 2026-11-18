@@ -1,0 +1,194 @@
+# Monitoring for the services that run outside Kubernetes (namespace infra → observability-01).
+# PostgreSQL: postgres-exporter per server, connecting through the infra Services as role `metrics`
+# (pg_monitor). MinIO: its built-in Prometheus endpoint, scraped with a bearer token.
+# Secrets infra/pg-exporter and infra/minio-metrics are created separately (INSTALL-RUNBOOK step B).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-exporter-queries
+  namespace: infra
+data:
+  queries.yaml: |
+    # Connections per client INSTANCE: PostgreSQL sees the node IP (Canal masquerades pod traffic),
+    # mapped here to the instance name.
+    pg_clients:
+      query: |
+        SELECT CASE host(client_addr)
+                 WHEN '10.0.20.10' THEN 'rke2-cp-01'
+                 WHEN '10.0.20.21' THEN 'farmer-app-01'
+                 WHEN '10.0.20.22' THEN 'commons-app-01'
+                 WHEN '10.0.20.23' THEN 'odk-central-01'
+                 WHEN '10.0.60.10' THEN 'observability-01'
+                 WHEN '10.0.60.20' THEN 'backup-01'
+                 WHEN '10.0.30.11' THEN 'pg-replica-01'
+                 ELSE coalesce(host(client_addr), 'local') END AS client_instance,
+               coalesce(datname, '') AS datname,
+               coalesce(usename, '') AS usename,
+               coalesce(state, '')   AS state,
+               count(*)              AS connections
+        FROM pg_stat_activity
+        WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
+        GROUP BY 1, 2, 3, 4
+      metrics:
+        - client_instance: {usage: LABEL, description: "Instance the connection comes from"}
+        - datname:         {usage: LABEL, description: "Database"}
+        - usename:         {usage: LABEL, description: "Role"}
+        - state:           {usage: LABEL, description: "Connection state"}
+        - connections:     {usage: GAUGE, description: "Client connections"}
+    # Standbys attached to this server (primary only; empty on the replica).
+    pg_standbys:
+      query: |
+        SELECT coalesce(host(client_addr), '') AS client_addr,
+               application_name,
+               state,
+               coalesce(extract(epoch FROM replay_lag), 0) AS replay_lag_seconds,
+               1 AS connected
+        FROM pg_stat_replication
+      metrics:
+        - client_addr:        {usage: LABEL, description: "Standby address"}
+        - application_name:   {usage: LABEL, description: "Standby name"}
+        - state:              {usage: LABEL, description: "Replication state"}
+        - replay_lag_seconds: {usage: GAUGE, description: "Replay lag reported by the primary"}
+        - connected:          {usage: GAUGE, description: "1 per attached standby"}
+    # Replication slots: WAL each slot holds back (primary only).
+    pg_slots:
+      query: |
+        SELECT slot_name,
+               coalesce(wal_status, '') AS wal_status,
+               active::int AS active,
+               CASE WHEN pg_is_in_recovery() THEN 0
+                    ELSE coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0) END AS retained_bytes
+        FROM pg_replication_slots
+      metrics:
+        - slot_name:      {usage: LABEL, description: "Slot"}
+        - wal_status:     {usage: LABEL, description: "reserved / extended / unreserved / lost"}
+        - active:         {usage: GAUGE, description: "1 if a standby is connected to the slot"}
+        - retained_bytes: {usage: GAUGE, description: "WAL retained for the slot, bytes"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-exporter-primary
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: primary}
+  annotations:
+    field.cattle.io/description: "Metrics for PostgreSQL PRIMARY pg-primary-01, via postgres-primary.infra"
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: primary}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: primary}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534}
+      containers:
+        - name: exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          args: [--extend.query-path=/etc/pg-exporter/queries.yaml]
+          env:
+            - {name: DATA_SOURCE_URI, value: "postgres-primary.infra.svc.cluster.local:5432/postgres?sslmode=require"}
+            - {name: DATA_SOURCE_USER, valueFrom: {secretKeyRef: {name: pg-exporter, key: username}}}
+            - {name: DATA_SOURCE_PASS, valueFrom: {secretKeyRef: {name: pg-exporter, key: password}}}
+          ports: [{name: metrics, containerPort: 9187}]
+          readinessProbe: {tcpSocket: {port: metrics}, periodSeconds: 10}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: queries, mountPath: /etc/pg-exporter}]
+      volumes: [{name: queries, configMap: {name: pg-exporter-queries}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-exporter-replica
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: replica}
+  annotations:
+    field.cattle.io/description: "Metrics for PostgreSQL REPLICA pg-replica-01, via postgres-replica.infra"
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: replica}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: replica}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534}
+      containers:
+        - name: exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+          args: [--extend.query-path=/etc/pg-exporter/queries.yaml]
+          env:
+            - {name: DATA_SOURCE_URI, value: "postgres-replica.infra.svc.cluster.local:5432/postgres?sslmode=require"}
+            - {name: DATA_SOURCE_USER, valueFrom: {secretKeyRef: {name: pg-exporter, key: username}}}
+            - {name: DATA_SOURCE_PASS, valueFrom: {secretKeyRef: {name: pg-exporter, key: password}}}
+          ports: [{name: metrics, containerPort: 9187}]
+          readinessProbe: {tcpSocket: {port: metrics}, periodSeconds: 10}
+          resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 128Mi}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: queries, mountPath: /etc/pg-exporter}]
+      volumes: [{name: queries, configMap: {name: pg-exporter-queries}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-exporter-primary
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: primary, openg2p.org/host: pg-primary-01}
+spec:
+  selector: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: primary}
+  ports: [{name: metrics, port: 9187, targetPort: metrics}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-exporter-replica
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: replica, openg2p.org/host: pg-replica-01}
+spec:
+  selector: {app.kubernetes.io/name: postgres-exporter, openg2p.org/pg-role: replica}
+  ports: [{name: metrics, port: 9187, targetPort: metrics}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgres
+  namespace: infra
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: postgres-exporter}}
+  endpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - {sourceLabels: [__meta_kubernetes_service_label_openg2p_org_pg_role], targetLabel: pg_role}
+        - {sourceLabels: [__meta_kubernetes_service_label_openg2p_org_host], targetLabel: pg_host}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: minio
+  namespace: infra
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: minio}}
+  endpoints:
+    - port: http-s3
+      path: /minio/v2/metrics/cluster
+      scheme: http
+      interval: 60s
+      authorization: {type: Bearer, credentials: {name: minio-metrics, key: token}}
+      relabelings:
+        - {targetLabel: minio_host, replacement: minio-01}
+---
+# The 6 VMs outside Kubernetes (k8s/infra-services.yaml → vm-alloy): host metrics from Grafana
+# Alloy's built-in unix exporter. Own job name (vm-alloy), so Rancher's cluster views keep
+# counting only Kubernetes nodes; instance = host name.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vm-alloy
+  namespace: infra
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: vm-alloy}}
+  endpoints:
+    - port: http-alloy
+      path: /api/v0/component/prometheus.exporter.unix.host/metrics
+      interval: 15s
+      relabelings:
+        - {sourceLabels: [__meta_kubernetes_endpoint_hostname], regex: (.+), targetLabel: instance}
+        - {sourceLabels: [__meta_kubernetes_endpointslice_endpoint_hostname], regex: (.+), targetLabel: instance}

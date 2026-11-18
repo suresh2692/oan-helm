@@ -1,0 +1,84 @@
+# Local disk on observability-01 for the monitoring and logging stack — INSTALL-RUNBOOK step 12.
+#
+# Before step 12, Prometheus kept its data in an emptyDir on rke2-cp-01 (lost on every restart)
+# and Loki + its MinIO lived on NFS served by pg-primary-01, so log writes landed on the database
+# host's disk. These PVs keep all of it on observability-01's own volume instead.
+#
+# Directories (created by hand on observability-01, owned by the pod's uid):
+#   /var/lib/openg2p-observability/prometheus   uid 1000  gid 2000   (data under prometheus-db/)
+#   /var/lib/openg2p-observability/loki         uid 10001 gid 10001
+#   /var/lib/openg2p-observability/loki-minio   uid 1000  gid 1000
+#
+# Each PV is pre-bound (claimRef) to the one PVC that uses it, so a PVC can never pick the
+# wrong disk. Retain: deleting a PVC keeps the files; delete the directory by hand if wanted.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: observability-local
+  annotations:
+    field.cattle.io/description: "Local disk on observability-01 (static PVs, no provisioner) — Prometheus, Loki, Loki's MinIO"
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: obs-prometheus
+  labels: {openg2p.org/part-of: observability}
+  annotations:
+    field.cattle.io/description: "Prometheus TSDB — observability-01:/var/lib/openg2p-observability/prometheus"
+spec:
+  storageClassName: observability-local
+  capacity: {storage: 40Gi}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  claimRef:
+    namespace: cattle-monitoring-system
+    name: prometheus-rancher-monitoring-prometheus-db-prometheus-rancher-monitoring-prometheus-0
+  local: {path: /var/lib/openg2p-observability/prometheus}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [observability-01]}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: obs-loki
+  labels: {openg2p.org/part-of: observability}
+  annotations:
+    field.cattle.io/description: "Loki WAL, index cache, ruler — observability-01:/var/lib/openg2p-observability/loki"
+spec:
+  storageClassName: observability-local
+  capacity: {storage: 10Gi}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  claimRef: {namespace: observability, name: storage-loki-0}
+  local: {path: /var/lib/openg2p-observability/loki}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [observability-01]}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: obs-loki-minio
+  labels: {openg2p.org/part-of: observability}
+  annotations:
+    field.cattle.io/description: "Loki log chunks (Loki's own MinIO) — observability-01:/var/lib/openg2p-observability/loki-minio"
+spec:
+  storageClassName: observability-local
+  capacity: {storage: 30Gi}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  claimRef: {namespace: observability, name: loki-minio}
+  local: {path: /var/lib/openg2p-observability/loki-minio}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [observability-01]}

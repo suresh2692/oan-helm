@@ -1,0 +1,123 @@
+# Services for things that run OUTSIDE Kubernetes, so they show in Rancher (Service Discovery)
+# and apps can use stable names, e.g. postgres-primary.infra.svc.cluster.local.
+# Selectorless Service + Endpoints. Kubernetes mirrors the Endpoints into EndpointSlices, so
+# both Istio (slices) and Prometheus (endpoints) see them.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-primary, openg2p.org/external: "true", openg2p.org/host: pg-primary-01}
+  annotations:
+    field.cattle.io/description: "PostgreSQL 16 PRIMARY on pg-primary-01 (10.0.30.10:5432), outside Kubernetes. Apps reach it through HAProxy (db-proxy/postgres:5432); this direct name is for the exporter and admin."
+    openg2p.org/target: "pg-primary-01 10.0.30.10"
+spec:
+  type: ClusterIP
+  ports:
+    - {name: tcp-postgres, port: 5432, targetPort: 5432, protocol: TCP}
+    - {name: http-role, port: 8008, targetPort: 8008, protocol: TCP}   # pg-role-check, for HAProxy (step C)
+    - {name: tcp-pgbouncer, port: 6432, targetPort: 6432, protocol: TCP}  # PgBouncer (step J)
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-primary
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-primary, openg2p.org/external: "true", openg2p.org/host: pg-primary-01}
+subsets:
+  - addresses: [{ip: 10.0.30.10}]
+    ports:
+      - {name: tcp-postgres, port: 5432, protocol: TCP}
+      - {name: http-role, port: 8008, protocol: TCP}
+      - {name: tcp-pgbouncer, port: 6432, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-replica, openg2p.org/external: "true", openg2p.org/host: pg-replica-01}
+  annotations:
+    field.cattle.io/description: "PostgreSQL 16 streaming REPLICA on pg-replica-01 (10.0.30.11:5432), read-only. Apps reach it through HAProxy (db-proxy/postgres:5433); this direct name is for the exporter and admin."
+    openg2p.org/target: "pg-replica-01 10.0.30.11"
+spec:
+  type: ClusterIP
+  ports:
+    - {name: tcp-postgres, port: 5432, targetPort: 5432, protocol: TCP}
+    - {name: http-role, port: 8008, targetPort: 8008, protocol: TCP}   # pg-role-check, for HAProxy (step C)
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-replica
+  namespace: infra
+  labels: {app.kubernetes.io/name: postgres-replica, openg2p.org/external: "true", openg2p.org/host: pg-replica-01}
+subsets:
+  - addresses: [{ip: 10.0.30.11}]
+    ports:
+      - {name: tcp-postgres, port: 5432, protocol: TCP}
+      - {name: http-role, port: 8008, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: infra
+  labels: {app.kubernetes.io/name: minio, openg2p.org/external: "true", openg2p.org/host: minio-01}
+  annotations:
+    field.cattle.io/description: "MinIO on minio-01 (10.0.30.20), outside Kubernetes. S3 API :9000, console :9001. Browser-facing name: https://minio.ati-uat.oanstaging.com"
+    openg2p.org/target: "minio-01 10.0.30.20"
+spec:
+  type: ClusterIP
+  ports:
+    - {name: http-s3, port: 9000, targetPort: 9000, protocol: TCP}
+    - {name: http-console, port: 9001, targetPort: 9001, protocol: TCP}
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: minio
+  namespace: infra
+  labels: {app.kubernetes.io/name: minio, openg2p.org/external: "true", openg2p.org/host: minio-01}
+subsets:
+  - addresses: [{ip: 10.0.30.20}]
+    ports:
+      - {name: http-s3, port: 9000, protocol: TCP}
+      - {name: http-console, port: 9001, protocol: TCP}
+---
+# Grafana Alloy on the 6 VMs outside Kubernetes (host CPU, memory, disk, network) — step 12.
+# Alloy 1.21.2 (hosts/alloy/), listening on each host's PRIVATE IP :12345; host metrics at
+# /api/v0/component/prometheus.exporter.unix.host/metrics (node-exporter's collectors and names).
+# ufw on pg-primary-01 and nginx-rp-01 admits 12345 from observability-01 (Prometheus) only.
+# Headless + one address per host, so Prometheus scrapes each VM separately; `hostname` names it.
+# (Replaced the node-exporter :9100 package that was here earlier on 2026-11-05.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vm-alloy
+  namespace: infra
+  labels: {app.kubernetes.io/name: vm-alloy, openg2p.org/external: "true"}
+  annotations:
+    field.cattle.io/description: "Grafana Alloy :12345 on the 6 VMs outside Kubernetes — pg-primary-01, pg-replica-01, minio-01, backup-01, nginx-rp-01, nat-01 (host metrics; logs go to Loki). Grafana: openg2p-test — Instances."
+spec:
+  clusterIP: None
+  ports:
+    - {name: http-alloy, port: 12345, targetPort: 12345, protocol: TCP}
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: vm-alloy
+  namespace: infra
+  labels: {app.kubernetes.io/name: vm-alloy, openg2p.org/external: "true"}
+subsets:
+  - addresses:
+      - {ip: 10.0.30.10, hostname: pg-primary-01}
+      - {ip: 10.0.30.11, hostname: pg-replica-01}
+      - {ip: 10.0.30.20, hostname: minio-01}
+      - {ip: 10.0.60.20, hostname: backup-01}
+      - {ip: 10.0.10.10, hostname: nginx-rp-01}
+      - {ip: 10.0.10.5, hostname: nat-01}
+    ports:
+      - {name: http-alloy, port: 12345, protocol: TCP}

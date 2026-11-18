@@ -1,0 +1,250 @@
+# HAProxy in front of PostgreSQL — INSTALL-RUNBOOK step C. Namespace db-proxy (k8s/namespaces.yaml).
+#
+#   postgres.db-proxy.svc.cluster.local:5432   READ-WRITE → whichever server answers /primary
+#   postgres.db-proxy.svc.cluster.local:5433   READ-ONLY  → the streaming replica; the primary only
+#                                                          when no replica is healthy
+#   postgres-read.db-proxy.svc.cluster.local   READ-ONLY on both 5432 and 5433, for charts that can
+#                                              set a host but not a port (commons/commons-postgresql-read)
+#
+# Roles come from pg-role-check on each PostgreSQL host (:8008, hosts/pg-role-check.py), reached
+# through the infra Services, so the host IPs still live only in k8s/infra-services.yaml.
+# One HAProxy pod per app instance (DaemonSet). The Services prefer the pod on the caller's own node
+# (trafficDistribution: PreferSameNode) and fall back to another node's pod if it is down.
+#
+# After editing haproxy.cfg: kubectl -n db-proxy rollout restart daemonset/haproxy
+# (one node at a time; that node's open DB connections are closed and the apps reconnect).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-config
+  namespace: db-proxy
+  labels: {app.kubernetes.io/name: haproxy, app.kubernetes.io/part-of: db-proxy}
+  annotations:
+    field.cattle.io/description: "HAProxy config — :5432 read-write (primary), :5433 read-only (replica, primary as fallback), :6432 PgBouncer on the primary (farmer registry pool, step J), :8404 stats + /metrics"
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0 info
+      maxconn 4000
+      # On restart, close pooled DB connections after 30 s instead of waiting for them forever.
+      hard-stop-after 30s
+
+    defaults
+      mode tcp
+      log global
+      option tcplog
+      # Log failed/aborted connections only — pools reconnect a lot under load.
+      option dontlog-normal
+      timeout connect 5s
+      # TCP inactivity limits. Long on purpose: app pools keep idle connections open, and
+      # HAProxy must not cut them; dead peers are caught by TCP keepalive instead.
+      timeout client 24h
+      timeout server 24h
+      timeout check 3s
+      option clitcpka
+      option srvtcpka
+
+    # Liveness of this proxy, the HAProxy stats page and Prometheus metrics.
+    frontend stats
+      mode http
+      bind :8404
+      option dontlog-normal
+      monitor-uri /healthz
+      http-request use-service prometheus-exporter if { path /metrics }
+      stats enable
+      stats uri /stats
+      stats refresh 10s
+
+    # 5432 — READ-WRITE. Always the server that says it is the primary.
+    frontend pg_rw
+      bind :5432
+      default_backend pg_primary
+
+    # 5433 — READ-ONLY. The replica; the primary only while no replica is healthy (alert
+    # PgProxyReadsOnPrimary). Fallback sessions stay on the primary until they reconnect.
+    frontend pg_ro
+      bind :5433
+      use_backend pg_replica if { nbsrv(pg_replica) gt 0 }
+      default_backend pg_primary
+    # Step J (2026-11-18): PgBouncer (transaction pooling) on whichever host is primary. Only pg-primary-01 runs
+    # PgBouncer today — install it on pg-replica-01 too before relying on a promotion.
+    frontend pg_pool
+      bind :6432
+      default_backend pg_primary_pool
+
+    # Both hosts are listed in both backends; the health check decides which one is which, so the
+    # ports follow a promotion. `balance first` sends everything to ONE healthy server — if both
+    # ever claim primary (split brain, alert PgProxyTwoPrimaries) writes still land on one only.
+    # A server that changes role is marked down and its sessions are closed.
+    backend pg_primary
+      balance first
+      option httpchk
+      http-check send meth GET uri /primary
+      http-check expect status 200
+      default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+      server pg-primary-01 postgres-primary.infra.svc.cluster.local:5432 check port 8008
+      server pg-replica-01 postgres-replica.infra.svc.cluster.local:5432 check port 8008
+
+    backend pg_primary_pool
+      balance first
+      option httpchk
+      http-check send meth GET uri /primary
+      http-check expect status 200
+      default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+      server pg-primary-01 postgres-primary.infra.svc.cluster.local:6432 check port 8008
+    backend pg_replica
+      balance first
+      option httpchk
+      http-check send meth GET uri /replica
+      http-check expect status 200
+      default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+      server pg-replica-01 postgres-replica.infra.svc.cluster.local:5432 check port 8008
+      server pg-primary-01 postgres-primary.infra.svc.cluster.local:5432 check port 8008
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: haproxy
+  namespace: db-proxy
+  labels: {app.kubernetes.io/name: haproxy, app.kubernetes.io/part-of: db-proxy}
+  annotations:
+    field.cattle.io/description: "HAProxy for PostgreSQL, one pod per app instance. Config: ConfigMap haproxy-config."
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: haproxy}}
+  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: haproxy, app.kubernetes.io/part-of: db-proxy}
+    spec:
+      # Same as the namespace pin; stated here so the DaemonSet does not try the control plane.
+      nodeSelector: {openg2p.org/db-proxy: "true"}
+      tolerations:
+        - {key: openg2p.org/pool, operator: Equal, value: farmer, effect: NoSchedule}
+        - {key: openg2p.org/pool, operator: Equal, value: commons, effect: NoSchedule}
+        - {key: openg2p.org/pool, operator: Equal, value: odk, effect: NoSchedule}
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 99     # `haproxy` in the official image
+        runAsGroup: 99
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: haproxy
+          image: docker.io/library/haproxy:3.2.25
+          ports:
+            - {name: pg-rw, containerPort: 5432}
+            - {name: pg-ro, containerPort: 5433}
+            - {name: pg-pool, containerPort: 6432}
+            - {name: stats, containerPort: 8404}
+          readinessProbe:
+            httpGet: {path: /healthz, port: stats}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: stats}
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            # Whole directory, not subPath, so the file on disk always matches the ConfigMap.
+            - {name: config, mountPath: /usr/local/etc/haproxy, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: haproxy-config}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: db-proxy
+  labels: {app.kubernetes.io/name: haproxy, app.kubernetes.io/part-of: db-proxy}
+  annotations:
+    field.cattle.io/description: "PostgreSQL via HAProxy — :5432 READ-WRITE (primary), :5433 READ-ONLY (replica). Uses the HAProxy on the caller's own node."
+spec:
+  selector: {app.kubernetes.io/name: haproxy}
+  trafficDistribution: PreferSameNode
+  ports:
+    - {name: tcp-postgres-rw, port: 5432, targetPort: pg-rw}
+    - {name: tcp-postgres-ro, port: 5433, targetPort: pg-ro}
+    - {name: tcp-pgbouncer, port: 6432, targetPort: pg-pool}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-read
+  namespace: db-proxy
+  labels: {app.kubernetes.io/name: haproxy, app.kubernetes.io/part-of: db-proxy}
+  annotations:
+    field.cattle.io/description: "PostgreSQL READ-ONLY via HAProxy on BOTH 5432 and 5433 — for charts that set a read host but assume port 5432."
+spec:
+  selector: {app.kubernetes.io/name: haproxy}
+  trafficDistribution: PreferSameNode
+  ports:
+    - {name: tcp-postgres, port: 5432, targetPort: pg-ro}
+    - {name: tcp-postgres-ro, port: 5433, targetPort: pg-ro}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy-metrics
+  namespace: db-proxy
+  labels: {app.kubernetes.io/name: haproxy-metrics, app.kubernetes.io/part-of: db-proxy}
+  annotations:
+    field.cattle.io/description: "HAProxy stats page (/stats) and Prometheus metrics (/metrics), every pod."
+spec:
+  selector: {app.kubernetes.io/name: haproxy}
+  ports:
+    - {name: http-stats, port: 8404, targetPort: stats}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: haproxy
+  namespace: db-proxy
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: haproxy-metrics}}
+  endpoints:
+    - port: http-stats
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - {sourceLabels: [__meta_kubernetes_pod_node_name], targetLabel: node}
+---
+# Shown in Rancher → Monitoring → Alerts. No receiver is configured yet (same as infra/data-services).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: db-proxy
+  namespace: db-proxy
+spec:
+  groups:
+    - name: openg2p-test.db-proxy
+      rules:
+        - alert: PgProxyNoPrimary
+          expr: haproxy_backend_active_servers{namespace="db-proxy", proxy="pg_primary"} == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "HAProxy on {{ $labels.node }} sees no PostgreSQL primary — writes on :5432 fail"
+        - alert: PgProxyTwoPrimaries
+          expr: haproxy_backend_active_servers{namespace="db-proxy", proxy="pg_primary"} > 1
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "Both PostgreSQL servers claim to be primary (split brain) — HAProxy on {{ $labels.node }} writes to the first only"
+        - alert: PgProxyReadsOnPrimary
+          expr: haproxy_backend_active_servers{namespace="db-proxy", proxy="pg_replica"} == 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "No healthy replica (down, not streaming, or > 30 s behind) — reads on :5433 go to the primary"
+        - alert: PgProxyDown
+          expr: up{namespace="db-proxy", job="haproxy-metrics"} == 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "HAProxy on {{ $labels.node }} is not answering — apps there use another node's HAProxy"

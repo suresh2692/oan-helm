@@ -1,0 +1,116 @@
+# grafana-external — Grafana for EXTERNAL users at https://grafana.ati-uat.oanstaging.com (INSTALL-RUNBOOK step 13).
+#   helm upgrade --install grafana-external grafana-community/grafana --version 14.0.1 -n observability -f values/grafana-external.yaml
+#
+# Separate from rancher-monitoring's Grafana on purpose: that one is reached through the Rancher proxy as an
+# ANONYMOUS Editor (Rancher does the gatekeeping), so it must never face the internet. This one has no anonymous
+# access, no login form, no basic auth — sign-in is ONLY through Keycloak realm `observability` (client `grafana`,
+# public + PKCE, so there is no client secret). Grafana role comes from the Keycloak client role
+# (claim grafana_roles): viewer / editor / admin; a user with none is refused. Users: k8s/tools/observability-access.sh.
+#
+# Same data and dashboards as the internal Grafana: Prometheus + Loki datasources, and the sidecar loads every
+# grafana_dashboard=1 ConfigMap from cattle-dashboards. Stateless (no PVC): accounts are recreated from Keycloak at
+# sign-in and dashboards are provisioned, so a restart loses only personal preferences.
+
+nodeSelector: {openg2p.org/pool: observability}
+tolerations:
+  - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+
+replicas: 1
+persistence: {enabled: false}
+testFramework: {enabled: false}
+
+resources:
+  requests: {cpu: 100m, memory: 192Mi}
+  limits: {cpu: "1", memory: 512Mi}
+
+podAnnotations:
+  field.cattle.io/description: "External Grafana — https://grafana.ati-uat.oanstaging.com, Keycloak realm observability"
+
+grafana.ini:
+  server:
+    domain: grafana.ati-uat.oanstaging.com
+    root_url: https://grafana.ati-uat.oanstaging.com/
+    enforce_domain: false
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+    check_for_plugin_updates: false
+    feedback_links_enabled: false
+  security:
+    cookie_secure: true
+    cookie_samesite: lax
+    disable_gravatar: true
+    strict_transport_security: true
+    content_security_policy: false
+  users:
+    allow_sign_up: false
+    allow_org_create: false
+    auto_assign_org: true
+    auto_assign_org_role: Viewer
+  auth:
+    disable_login_form: true
+    oauth_auto_login: true
+    oauth_allow_insecure_email_lookup: false
+    signout_redirect_url: https://keycloak.ati-uat.oanstaging.com/realms/observability/protocol/openid-connect/logout?client_id=grafana&post_logout_redirect_uri=https%3A%2F%2Fgrafana.ati-uat.oanstaging.com%2Flogin
+  auth.anonymous:
+    enabled: false
+  auth.basic:
+    enabled: false
+  auth.generic_oauth:
+    enabled: true
+    name: Keycloak
+    icon: signin
+    allow_sign_up: true            # first Keycloak sign-in creates the Grafana user; who may sign in is decided by the role below
+    client_id: grafana             # public client + PKCE: no client_secret (the chart rejects the key even when empty)
+    use_pkce: true
+    auth_style: InParams
+    scopes: openid email profile
+    auth_url: https://keycloak.ati-uat.oanstaging.com/realms/observability/protocol/openid-connect/auth
+    token_url: https://keycloak.ati-uat.oanstaging.com/realms/observability/protocol/openid-connect/token
+    api_url: https://keycloak.ati-uat.oanstaging.com/realms/observability/protocol/openid-connect/userinfo
+    login_attribute_path: preferred_username
+    email_attribute_path: email
+    name_attribute_path: name
+    role_attribute_path: "contains(grafana_roles[*], 'admin') && 'Admin' || contains(grafana_roles[*], 'editor') && 'Editor' || contains(grafana_roles[*], 'viewer') && 'Viewer'"
+    role_attribute_strict: true    # no Grafana role in Keycloak → sign-in refused
+    allow_assign_grafana_admin: false
+    skip_org_role_sync: false
+  dashboards:
+    default_home_dashboard_path: /tmp/dashboards/openg2p-test-instances.json
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090
+        isDefault: true
+        editable: false
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: http://loki.observability.svc:3100
+        editable: false
+        jsonData:
+          maxLines: 1000
+          httpHeaderName1: X-Scope-OrgID
+        secureJsonData:
+          httpHeaderValue1: fake    # Loki auth_enabled=false stores everything under tenant "fake" — not a secret
+
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    searchNamespace: cattle-dashboards
+    folder: /tmp/dashboards
+    # Its reload call uses the admin's basic auth, which is off here (401). Grafana's file provider re-reads the
+    # folder by itself, so a changed dashboard ConfigMap still shows up within ~30 s.
+    skipReload: true
+    provider:
+      allowUiUpdates: false
+      disableDelete: true

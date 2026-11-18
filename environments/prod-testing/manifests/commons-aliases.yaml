@@ -1,0 +1,75 @@
+# In-cluster names that the Commons and registry charts hard-code (commons-postgresql,
+# commons-minio …), pointed at the data services that run OUTSIDE Kubernetes. MinIO goes straight
+# to its `infra` Service; PostgreSQL goes through HAProxy (k8s/db-proxy.yaml, step C), which reaches
+# the hosts through the `infra` Services — so the real host addresses still live in exactly one
+# place (k8s/infra-services.yaml). Visible in Rancher: Service Discovery → Services → commons.
+apiVersion: v1
+kind: Service
+metadata:
+  name: commons-postgresql
+  namespace: commons
+  labels: {app.kubernetes.io/name: postgresql, openg2p.org/external: "true", openg2p.org/via: db-proxy}
+  annotations:
+    field.cattle.io/description: "PostgreSQL via HAProxy (alias of db-proxy/postgres) — :5432 READ-WRITE (primary, today pg-primary-01), :5433 READ-ONLY (replica pg-replica-01). Name kept because Commons and registry charts default to it."
+spec:
+  type: ExternalName
+  externalName: postgres.db-proxy.svc.cluster.local
+  ports: [{name: tcp-postgres, port: 5432, targetPort: 5432}, {name: tcp-postgres-ro, port: 5433, targetPort: 5433}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commons-postgresql-read
+  namespace: commons
+  labels: {app.kubernetes.io/name: postgresql, openg2p.org/external: "true", openg2p.org/via: db-proxy}
+  annotations:
+    field.cattle.io/description: "PostgreSQL READ-ONLY — alias of db-proxy/postgres-read (HAProxy → the streaming replica pg-replica-01; the primary only while no replica is healthy). Port 5432 or 5433. For reporting/analytics reads."
+spec:
+  type: ExternalName
+  externalName: postgres-read.db-proxy.svc.cluster.local
+  ports: [{name: tcp-postgres, port: 5432, targetPort: 5432}, {name: tcp-postgres-ro, port: 5433, targetPort: 5433}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commons-minio
+  namespace: commons
+  labels: {app.kubernetes.io/name: minio, openg2p.org/external: "true", openg2p.org/host: minio-01}
+  annotations:
+    field.cattle.io/description: "MinIO S3 API — alias of infra/minio → minio-01 10.0.30.20:9000. Browsers use https://minio.ati-uat.oanstaging.com instead."
+spec:
+  type: ExternalName
+  externalName: minio.infra.svc.cluster.local
+  ports:
+    - {name: http-s3, port: 9000, targetPort: 9000}
+    - {name: http-console, port: 9001, targetPort: 9001}
+---
+# ── namespace farmer ──────────────────────────────────────────────────────────────────────────
+# The farmer chart calls two Commons services by SHORT name (no namespace), which resolves inside
+# `farmer`: db-seed waits on http://commons-services-awe:80, and four workloads publish events to
+# http://commons-services-websub. These aliases make the short names resolve to Commons.
+apiVersion: v1
+kind: Service
+metadata:
+  name: commons-services-awe
+  namespace: farmer
+  labels: {openg2p.org/alias-of: commons}
+  annotations:
+    field.cattle.io/description: "Alias → commons/commons-services-awe (AWE API). The farmer chart's db-seed calls it by short name."
+spec:
+  type: ExternalName
+  externalName: commons-services-awe.commons.svc.cluster.local
+  ports: [{name: http, port: 80, targetPort: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commons-services-websub
+  namespace: farmer
+  labels: {openg2p.org/alias-of: commons}
+  annotations:
+    field.cattle.io/description: "Alias → commons/commons-services-websub (WebSub hub). Farmer workloads publish events to it by short name."
+spec:
+  type: ExternalName
+  externalName: commons-services-websub.commons.svc.cluster.local
+  ports: [{name: http, port: 80, targetPort: 80}]

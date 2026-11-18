@@ -1,0 +1,73 @@
+# Alerts for the services outside Kubernetes. Shown in Rancher → Monitoring → Alertmanager / Prometheus Alerts.
+# No notification receiver is configured yet, so they are visible but not sent anywhere.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: data-services
+  namespace: infra
+spec:
+  groups:
+    - name: openg2p-test.postgres
+      rules:
+        - alert: PostgresDown
+          expr: pg_up == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: "PostgreSQL {{ $labels.pg_role }} ({{ $labels.pg_host }}) is not answering the exporter"
+        - alert: PostgresExporterDown
+          expr: up{namespace="infra", job=~"pg-exporter-.*"} == 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "postgres-exporter for {{ $labels.pg_role }} is down — PostgreSQL health is not being measured"
+        - alert: PostgresReplicaLagging
+          expr: pg_replication_lag_seconds{pg_role="replica"} > 60
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "pg-replica-01 is {{ $value | humanizeDuration }} behind the primary"
+        - alert: PostgresReplicaNotStreaming
+          expr: pg_slots_active{pg_role="primary", slot_name="pg_replica_01"} == 0
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Replica is not connected to slot pg_replica_01 — the primary is holding WAL for it (capped at 20 GB)"
+        - alert: PostgresSlotRetainingWAL
+          expr: pg_slots_retained_bytes{pg_role="primary"} > 10 * 1024^3
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Slot {{ $labels.slot_name }} holds {{ $value | humanize1024 }}B of WAL; at 20 GB the slot is invalidated and the replica must be rebuilt"
+        - alert: PostgresReplicaPromoted
+          expr: pg_replication_is_replica{pg_role="replica"} == 0
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "pg-replica-01 is no longer in recovery (promoted?) — two writable servers is a split-brain risk"
+        - alert: PostgresConnectionsHigh
+          expr: sum by (pg_role) (pg_clients_connections) / on (pg_role) max by (pg_role) (pg_settings_max_connections) > 0.8
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "PostgreSQL {{ $labels.pg_role }} is using {{ $value | humanizePercentage }} of max_connections (300)"
+    - name: openg2p-test.minio
+      rules:
+        - alert: MinioDown
+          expr: up{namespace="infra", job="minio"} == 0
+          for: 3m
+          labels: {severity: critical}
+          annotations:
+            summary: "MinIO on minio-01 is not answering the metrics scrape"
+        - alert: MinioUnhealthy
+          expr: minio_cluster_health_status == 0
+          for: 3m
+          labels: {severity: critical}
+          annotations:
+            summary: "MinIO reports the cluster unhealthy"
+        - alert: MinioDiskSpaceLow
+          expr: minio_cluster_capacity_usable_free_bytes / minio_cluster_capacity_usable_total_bytes < 0.2
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "MinIO /data on minio-01 has {{ $value | humanizePercentage }} free"

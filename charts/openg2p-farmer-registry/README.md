@@ -54,3 +54,36 @@ or Git. The public key is printed in the hook log and published in ConfigMap
 `REGISTRY_PARTNER_API_CRYPTO_SIGNING_KEY_PASSWORD` (from the Secret) and
 `REGISTRY_PARTNER_API_CRYPTO_SIGNING_KEY_KID` (`dciSigning.kid`) through
 `registry.partnerApi` per environment.
+
+## Autoscaling with scale behaviour
+
+`autoscaling.staffApi`, `autoscaling.partnerApi` and `autoscaling.celeryWorker` render
+`autoscaling/v2` HorizontalPodAutoscalers for the registry subchart Deployments, with an
+optional `behavior` block. The subchart's own HPA (`registry.<component>.autoscaling`) has no
+`behavior`, and the Celery worker has no HPA at all. All three are off by default; rendering
+fails if both HPAs are enabled for one component.
+
+Throttle staff and partner API scale-up (for example +1 pod per minute). Each new pod runs
+the farmer startup migration, which holds an exclusive lock on `g2p_register_farmers` for
+about a minute with 1M farmers. The subchart still renders `replicas`, so keep
+`registry.<component>.replicaCount` equal to `minReplicas`. CPU utilisation is measured
+against the container's CPU request. An existing hand-made HPA with the same name must be
+deleted before the upgrade. Example: `environments/prod-testing/values/farmer.yaml`.
+
+## Database settings
+
+With `dbSettings.enabled`, a post-install/post-upgrade hook Job connects as the registry's
+own database user (no superuser) and, idempotently:
+
+- builds the trigram GIN index `idx_g2p_register_farmers_search_text_trigram` on
+  `g2p_register_farmers.search_text` with `CREATE INDEX CONCURRENTLY` (no table lock). An
+  invalid index left by an interrupted build is dropped and rebuilt. The chart never drops
+  the index. Staff portal search by name or Farmer ID (`search_text ILIKE '%term%'`) then
+  reads the index; with 1M farmers it fell from ~1.4 s to ~0.1 s.
+- sets `dbSettings.roleSettings` on the registry user (`ALTER ROLE CURRENT_USER SET`). They
+  apply to new sessions; pooled connections pick them up when recycled. With the index, set
+  `plan_cache_mode: force_custom_plan`. Otherwise the application's prepared statements
+  switch to a generic plan that also uses the index for browse (an empty filter matches
+  every row), which made browse about twice as slow.
+
+The Job uses the `registry.dbSeed` image unless `dbSettings.image` is set.

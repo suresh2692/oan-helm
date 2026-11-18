@@ -1,0 +1,107 @@
+{{- /*
+Database-side settings the registry needs at scale, applied after every install/upgrade by an idempotent Job that
+connects as the registry's own database user (no superuser):
+  - a trigram GIN index on g2p_register_farmers.search_text, so the staff portal's name / Farmer ID search
+    (search_text ILIKE '%term%') reads the index instead of every farmer. Built CONCURRENTLY (no table lock);
+    an INVALID leftover from an interrupted build is dropped and rebuilt. Never dropped by this chart.
+  - role settings for the registry user (ALTER ROLE CURRENT_USER SET ...). They apply to NEW sessions only;
+    pooled connections pick them up when they are recycled (PgBouncer: RECONNECT <db>).
+*/ -}}
+{{- if .Values.dbSettings.enabled }}
+{{- $settings := .Values.dbSettings }}
+{{- $imageRepo := $settings.image.repository | default .Values.registry.dbSeed.image.repository }}
+{{- $imageTag := $settings.image.tag | default .Values.registry.dbSeed.image.tag }}
+{{- range $key, $value := $settings.roleSettings }}
+{{- if not (regexMatch "^[a-z_]+$" $key) }}
+{{- fail (printf "dbSettings.roleSettings: %q is not a valid setting name" $key) }}
+{{- end }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-fr-db-settings
+  labels:
+    app.kubernetes.io/name: fr-db-settings
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "40"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: {{ add $settings.waitForSchemaSeconds $settings.buildTimeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fr-db-settings
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      {{- with $settings.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: db-settings
+          image: {{ printf "%s:%s" $imageRepo $imageTag | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              q() { psql -qtAX -v ON_ERROR_STOP=1 -c "$1"; }
+              attempts=0
+              until [ "$(q "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='g2p_register_farmers' AND column_name='search_text')")" = t ]; do
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge {{ div $settings.waitForSchemaSeconds 5 }} ]; then
+                  echo 'g2p_register_farmers.search_text not found: registry schema not ready' >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+              {{- if $settings.searchTrigramIndex }}
+              q "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+              if [ "$(q "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_g2p_register_farmers_search_text_trigram' AND NOT i.indisvalid)")" = t ]; then
+                echo 'dropping INVALID idx_g2p_register_farmers_search_text_trigram left by an interrupted build'
+                q "DROP INDEX CONCURRENTLY IF EXISTS public.idx_g2p_register_farmers_search_text_trigram"
+              fi
+              psql -qX -v ON_ERROR_STOP=1 <<'SQL'
+              SET statement_timeout = 0;
+              SET maintenance_work_mem = '{{ $settings.maintenanceWorkMem }}';
+              CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_g2p_register_farmers_search_text_trigram
+                ON public.g2p_register_farmers USING gin (search_text gin_trgm_ops);
+              COMMENT ON INDEX public.idx_g2p_register_farmers_search_text_trigram IS
+                'Staff portal search (search_text ILIKE). Managed by the {{ .Release.Name }} chart (dbSettings); do not drop.';
+              SQL
+              echo "search index: $(q "SELECT pg_size_pretty(pg_relation_size('public.idx_g2p_register_farmers_search_text_trigram'::regclass))")"
+              {{- end }}
+              {{- range $key, $value := $settings.roleSettings }}
+              q "ALTER ROLE CURRENT_USER SET {{ $key }} = {{ $value | toString | squote }}"
+              {{- end }}
+              echo "role settings: $(q "SELECT coalesce(array_to_string(setconfig, ', '), 'none') FROM pg_db_role_setting WHERE setrole = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND setdatabase = 0")"
+          env:
+            - name: PGHOST
+              value: {{ tpl .Values.global.postgresqlHost $ | quote }}
+            - name: PGPORT
+              value: {{ .Values.global.registryDBPort | quote }}
+            - name: PGDATABASE
+              value: {{ tpl .Values.global.registryDB $ | quote }}
+            - name: PGUSER
+              value: {{ tpl .Values.global.registryDBUser $ | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ tpl .Values.global.registryDBSecret $ | quote }}
+                  key: {{ tpl .Values.global.registryDBUserPasswordKey $ | quote }}
+            - name: PGAPPNAME
+              value: fr-db-settings
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: [ALL]
+          resources: {{- toYaml $settings.resources | nindent 12 }}
+{{- end }}

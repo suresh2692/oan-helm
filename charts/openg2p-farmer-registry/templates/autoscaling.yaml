@@ -1,0 +1,51 @@
+{{- /*
+OAN autoscalers (autoscaling/v2) for the registry subchart Deployments, with scale behaviour.
+The subchart's own HPA (registry.<component>.autoscaling) has no `behavior`, and the Celery worker has none at all.
+Throttling matters here: every new staff/partner API pod runs the farmer startup migration, which holds an exclusive
+lock on g2p_register_farmers for about a minute, so pods must be added one at a time.
+Use INSTEAD of the subchart HPA; rendering fails if both are on for the same component.
+*/ -}}
+{{- range $component := list "staffApi" "partnerApi" "celeryWorker" }}
+{{- $hpa := index ($.Values.autoscaling | default dict) $component | default dict }}
+{{- if $hpa.enabled }}
+{{- $sub := index $.Values.registry $component }}
+{{- if and $sub.autoscaling $sub.autoscaling.enabled }}
+{{- fail (printf "autoscaling.%s.enabled and registry.%s.autoscaling.enabled are both true: enable only one HPA per Deployment" $component $component) }}
+{{- end }}
+{{- if lt (int $hpa.maxReplicas) (int $hpa.minReplicas) }}
+{{- fail (printf "autoscaling.%s: maxReplicas (%v) is below minReplicas (%v)" $component $hpa.maxReplicas $hpa.minReplicas) }}
+{{- end }}
+{{- $name := include "oan.registryComponentFullname" (dict "values" $sub "context" $) }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: {{ $sub.nameOverride }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    app.kubernetes.io/component: autoscaler
+  {{- with $hpa.description }}
+  annotations:
+    field.cattle.io/description: {{ . | quote }}
+  {{- end }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ $hpa.minReplicas }}
+  maxReplicas: {{ $hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $hpa.targetCPUUtilizationPercentage }}
+  {{- with $hpa.behavior }}
+  behavior: {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

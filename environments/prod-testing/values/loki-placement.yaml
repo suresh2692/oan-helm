@@ -1,0 +1,30 @@
+# loki 6.24.0 (grafana/loki) — placement overlay, INSTALL-RUNBOOK step 12.
+# Loki, its gateway and its MinIO on observability-01, data on local disk (PVs obs-loki and
+# obs-loki-minio, k8s/observability-local-storage.yaml) instead of NFS on pg-primary-01.
+#
+# Applied ON TOP of the values the upstream helmfile installed with (never --reuse-values):
+#   helm -n observability get values loki -o yaml > base.yaml      # contains the MinIO root creds
+#   helm upgrade loki grafana/loki --version 6.24.0 -n observability -f base.yaml -f values/loki-placement.yaml
+# The StatefulSet's volumeClaimTemplate and the MinIO PVC are immutable, so the first move needed
+# the StatefulSet and both PVCs deleted first (data copied, see the runbook). A later upstream
+# `helmfile sync` drops this overlay — re-apply it afterwards.
+singleBinary:
+  nodeSelector: {openg2p.org/pool: observability}
+  tolerations:
+    - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: observability-local
+gateway:
+  nodeSelector: {openg2p.org/pool: observability}
+  tolerations:
+    - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+minio:
+  nodeSelector: {openg2p.org/pool: observability}
+  tolerations:
+    - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}
+  persistence:
+    enabled: true
+    size: 30Gi
+    storageClass: observability-local

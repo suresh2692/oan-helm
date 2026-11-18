@@ -1,0 +1,18 @@
+# https://grafana.ati-uat.oanstaging.com → grafana-external (INSTALL-RUNBOOK step 13).
+# Public: the hostname is in nginx-rp-01 /etc/nginx/snippets/openg2p-test-public-hosts.conf. Sign-in is Keycloak
+# only (realm observability). TLS ends at the RP (wildcard cert); plain HTTP from there, as for every app here.
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: grafana-external
+  namespace: observability
+  annotations:
+    field.cattle.io/description: "Public Grafana for external users — Keycloak realm observability"
+spec:
+  hosts: [grafana.ati-uat.oanstaging.com]
+  gateways: [test/internal]
+  http:
+    - route:
+        - destination:
+            host: grafana-external.observability.svc.cluster.local
+            port: {number: 80}

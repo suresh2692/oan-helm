@@ -1,0 +1,21 @@
+# Log intake for the 6 VMs outside Kubernetes — INSTALL-RUNBOOK step 12.
+# Grafana Alloy on pg-primary-01, pg-replica-01, minio-01, nginx-rp-01, nat-01 and backup-01
+# (hosts/alloy/) pushes to http://10.0.60.10:31100/loki/api/v1/push — this NodePort on
+# observability-01, in front of the Loki gateway that already takes the in-cluster OTLP logs.
+# observability-01's ufw admits 30000-32767/tcp from 10.0.0.0/16 only; nothing is public.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-push
+  namespace: observability
+  labels: {app.kubernetes.io/name: loki-push, app.kubernetes.io/part-of: observability}
+  annotations:
+    field.cattle.io/description: "Loki push endpoint for the VMs' Alloy agents — http://10.0.60.10:31100/loki/api/v1/push (VPC only)"
+spec:
+  type: NodePort
+  # Keep the client's node-local path: the gateway runs on observability-01, which is the address
+  # the agents use, so no extra hop to another node.
+  externalTrafficPolicy: Local
+  selector: {app.kubernetes.io/component: gateway, app.kubernetes.io/instance: loki, app.kubernetes.io/name: loki}
+  ports:
+    - {name: http-push, port: 80, targetPort: http-metrics, nodePort: 31100, protocol: TCP}

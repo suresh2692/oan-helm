@@ -1,0 +1,8 @@
+# otel-gateway (open-telemetry/opentelemetry-collector 0.111.0) — placement overlay, INSTALL-RUNBOOK step 12.
+# The OTLP gateway that the per-node otel-agents send pod logs to; it forwards them to Loki.
+#   helm -n observability get values otel-gateway -o yaml > base.yaml
+#   helm upgrade otel-gateway open-telemetry/opentelemetry-collector --version 0.111.0 -n observability \
+#     -f base.yaml -f values/otel-gateway-placement.yaml
+nodeSelector: {openg2p.org/pool: observability}
+tolerations:
+  - {key: openg2p.org/pool, operator: Equal, value: observability, effect: NoSchedule}

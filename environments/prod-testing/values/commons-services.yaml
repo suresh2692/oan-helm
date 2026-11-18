@@ -1,0 +1,51 @@
+# openg2p-commons-services 1.0.0-dev.35 (repo oan-helm =
+#   https://raw.githubusercontent.com/Centre-for-Open-Societal-Systems/oan-helm/main/repository/)
+# Release `commons-services`, namespace `commons` → commons-app-01. INSTALL-RUNBOOK step 10.
+#
+# Install with TWO files, this one last:
+#   -f values/commons-services-gateways.yaml   (generated: every istio-system/development → test/internal)
+#   -f values/commons-services.yaml            (this file)
+#
+# The chart defaults ARE oan's dev configuration, with every hostname derived from
+# global.baseDomain — so changing the domain moves all of them. In-cluster URLs
+# (commons-keycloak.commons.svc …) already match: same release names, same namespace as dev.
+# No secrets in this file. Pre-created in `commons` (INSTALL-RUNBOOK step 10):
+#   commons-postgresql (PG superuser), commons-minio (MinIO keys, scoped to bucket openg2p-geo),
+#   commons-websub-encryption, consent-manager-otp-dev.
+global:
+  baseDomain: ati-uat.oanstaging.com
+
+# ODK Central is a SEPARATE installation in namespace `odk` (decision 2026-11-04).
+odk-central:
+  enabled: false
+
+# Not part of this environment. Both need dev-provisioned material that does not exist here:
+# aggregationApi a signing keystore (aggregation-api-signing-rsa-20261023), runtime Secret and a
+# registry catalog ConfigMap; consentPartnerPortal a `partner`-realm client.
+aggregationApi:
+  enabled: false
+consentPartnerPortal:
+  enabled: false
+
+# Consent Manager publishes OTPs to MinIO bucket a2c-webhook for A2C in dev. No A2C here.
+openg2p-consent-manager:
+  consentManagerApi:
+    envVars:
+      CONSENT_MANAGER_OTP_PUBLISH_ENABLED: 'false'
+
+# Master Data geography + code lists. The chart has the seed OFF because dev already held a
+# migrated geography that a demo seed must not replace (oan-helm docs/refactor-location-and-ownership.md).
+# This database is EMPTY, so there is nothing to protect: load the ETH-OAN pack (Ethiopia,
+# region > zone > woreda > kebele, + agriculture code lists) once. First load publishes v1; later
+# changes become drafts for approval in Master Data (autoPublish stays false).
+# Boundary GeoJSON goes to MinIO bucket openg2p-geo through commons-minio (minio-01).
+master-data:
+  geoSeed:
+    enabled: true
+    countryPack: ETH-OAN
+    publishInitial: true
+    autoPublish: false
+    load:
+      geo: true
+      codelists: true
+      samples: false
