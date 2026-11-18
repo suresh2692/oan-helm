@@ -124,11 +124,11 @@ registry:
     image:
       repository: 379220350808.dkr.ecr.ap-south-1.amazonaws.com/openg2p/farmer-registry/partner-api
       tag: 262e0d949a99@sha256:c650ba8b7e50bda7def4d3b8aa0c7e9399d498bb55676000e86af50342d8dff3
-    # prod-testing: CPU request 50m → 1000m so the autoscaler has a meaningful baseline (70% = 0.7 core);
-    # memory = the subchart defaults (idles at ~385 Mi).
+    # prod-testing: CPU request 50m → 1500m (same as the staff API and Celery worker; the autoscaler's baseline,
+    # 70% = 1.05 cores). No CPU limit. Memory = the subchart defaults (idles at ~385 Mi).
     replicaCount: 1                  # = autoscaling.partnerApi.minReplicas
     resources:
-      requests: {cpu: 1000m, memory: 640Mi}
+      requests: {cpu: 1500m, memory: 640Mi}
       limits: {memory: 1280Mi}
     autoscaling:
       enabled: false                 # subchart HPA off: autoscaling.partnerApi is used
@@ -598,7 +598,7 @@ autoscaling:
     minReplicas: 1
     maxReplicas: 3
     targetCPUUtilizationPercentage: 70
-    description: "Partner API: 1-3 pods at 70% of the 1000m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
+    description: "Partner API: 1-3 pods at 70% of the 1500m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
     behavior: *throttled
   celeryWorker:
     enabled: true

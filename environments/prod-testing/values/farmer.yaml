@@ -61,7 +61,7 @@ registry:
       tag: 90811b61a59f@sha256:800b7b097a4fd8bf7a09ef0e24969ed374e0126933d9aa79c47e186644f4315c
     replicaCount: 1
     resources:
-      requests: {cpu: 1000m, memory: 640Mi}
+      requests: {cpu: 1500m, memory: 640Mi}
       limits: {memory: 1280Mi}
     autoscaling:
       enabled: false
@@ -152,7 +152,7 @@ autoscaling:
     minReplicas: 1
     maxReplicas: 3
     targetCPUUtilizationPercentage: 70
-    description: "Partner API: 1-3 pods at 70% of the 1000m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
+    description: "Partner API: 1-3 pods at 70% of the 1500m CPU request; +1 pod/min, -1 pod/2 min after 5 min"
     behavior: *throttled
   celeryWorker:
     enabled: true
